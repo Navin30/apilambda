@@ -8,6 +8,8 @@ import * as path from "path"
 import { LogGroup } from "@aws-cdk/aws-logs";
 import * as route53 from "@aws-cdk/aws-route53";
 import * as alias from "@aws-cdk/aws-route53-targets";
+import * as wafv2 from '@aws-cdk/aws-wafv2';
+
 export class MycloudStack extends cdk.Stack {
   constructor(scope: cdk.Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
@@ -109,8 +111,8 @@ export class MycloudStack extends cdk.Stack {
     },
     
     loggingConfig: {
-      bucket: new s3.Bucket(this, 'nvCloudlogs', {
-      bucketName: 'nvCloudlogs',
+      bucket: new s3.Bucket(this, 'LogBucket', {
+      bucketName: 'nvlambdalogbucket',
         lifecycleRules: [
             {
               enabled: true,
@@ -145,6 +147,7 @@ export class MycloudStack extends cdk.Stack {
           
           allowedMethods: cloudfront.CloudFrontAllowedMethods.ALL,
           pathPattern: "/hello",
+          
         },
       ],
       customOriginSource: {
@@ -165,11 +168,21 @@ export class MycloudStack extends cdk.Stack {
         domainName: `${apiGateway.restApiId}.execute-api.${this.region}.${this.urlSuffix}`,
       },
       originPath: `/${apiGateway.deploymentStage.stageName}`,
-    }
+    },
     
-    ],
+],
+errorConfigurations:
+[
+  {
+    errorCode: 404,
+    errorCachingMinTtl: 0,
+    "responseCode": 200,
+    "responsePagePath": "//cloudfronterrorbucket.s3.sa-east-1.amazonaws.com/error.html"
+  },
+],
     defaultRootObject: "",
     comment: "nv lambda Api" 
+    
   });
   const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'ZenithWebFoundryZone', {
     hostedZoneId: 'Z0918647YP9QBSN696HQ',
@@ -180,15 +193,48 @@ export class MycloudStack extends cdk.Stack {
     target: route53.RecordTarget.fromAlias(new alias.CloudFrontTarget(distribution)),
     
   });
-  errorConfigurations:
-     [
-        {
-          errorCode: 403,
-          errorCachingMinTtl: 0,
-          "responseCode": 200,
-          "responsePagePath": "/index.html"
-        },
-      ]
-    
-  }
+ 
+  const ipSet = new wafv2.CfnIPSet(this, 'IPSet', {
+    addresses: ['103.16.13.205/32'],
+    scope: 'CLOUDFRONT',
+    ipAddressVersion: 'IPV4'
+  });
+
+  // Create WAFv2 Rule IP Whitelisting
+  const rules: wafv2.CfnWebACL.RuleProperty[] = [];
+  rules.push(
+    {
+      name: 'IPWhitelistRule', // Note the PascalCase for all the properties
+      priority: 1,
+      action: {
+        allow: {}
+      },
+      statement: {
+        ipSetReferenceStatement: {
+          arn: ipSet.attrArn
+        }
+      },
+      visibilityConfig: {
+        cloudWatchMetricsEnabled: true,
+        metricName: 'ipWhitelist',
+        sampledRequestsEnabled: false,
+      }
+    }
+  );
+
+  const webACL = new wafv2.CfnWebACL(this, 'WebACL', {
+    defaultAction: {
+      block: {},
+    },
+    scope: 'CLOUDFRONT',
+    visibilityConfig: {
+      cloudWatchMetricsEnabled: true,
+      metricName: 'waf',
+      sampledRequestsEnabled: false,
+    },
+  });
+  webACL.addPropertyOverride("rules", rules);
 }
+}
+   
+  
